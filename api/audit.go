@@ -1,5 +1,11 @@
 package api
 
-// AuditEvent is declared in server.go to keep this initial version compact.
-// In a production research deployment, persist these records to an
-// append-only database table and protect them from modification.
+import "time"
+
+type AuditEvent struct {
+	ID        int       `json:"id"`
+	Actor     string    `json:"actor"`
+	Action    string    `json:"action"`
+	Detail    string    `json:"detail"`
+	CreatedAt time.Time `json:"created_at"`
+}
