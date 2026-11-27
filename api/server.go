@@ -38,7 +38,7 @@ func NewServer(addr, usersPath string) (*Server, error) {
 	mux.HandleFunc("POST /api/metrics/research-event", server.requireAuth(server.recordResearchEvent))
 	mux.HandleFunc("GET /api/audit", server.requireAuth(server.getAudit))
 
-	mux.Handle("/", server.requireAuthHandler(http.FileServer(http.Dir("./web"))))
+	mux.Handle("/", http.FileServer(http.Dir("./web")))
 
 	server.http = &http.Server{
 		Addr:              addr,
