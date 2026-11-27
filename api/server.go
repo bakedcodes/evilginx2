@@ -4,59 +4,66 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
 
-type Metrics struct {
-	mu                    sync.Mutex
-	CampaignsActive       int       `json:"campaigns_active"`
-	AuthenticationTests   int       `json:"authentication_tests"`
-	MfaPrompts            int       `json:"mfa_prompts"`
-	ControlsTriggered     int       `json:"controls_triggered"`
-	ResearchEvents        int       `json:"research_events"`
-	LastResearchEventAt   time.Time `json:"last_research_event_at"`
-}
-
 type Server struct {
-	httpServer *http.Server
-	metrics    *Metrics
-	audit      []AuditEvent
-	auditMu    sync.Mutex
+	store       *Store
+	httpServer  *http.Server
+	loginMu     sync.Mutex
+	loginCounts map[string]*loginAttempt
 }
 
-type AuditEvent struct {
-	ID        int       `json:"id"`
-	Actor     string    `json:"actor"`
-	Action    string    `json:"action"`
-	Detail    string    `json:"detail"`
-	CreatedAt time.Time `json:"created_at"`
+type loginAttempt struct {
+	count     int
+	lastAttempt time.Time
 }
 
-func NewServer(addr string) *Server {
-	metrics := &Metrics{}
+func NewServer(addr, dataDir string) (*Server, error) {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return nil, err
+	}
 
-	s := &Server{
-		metrics: metrics,
+	store, err := NewStore(filepath.Join(dataDir, "panel.db"))
+	if err != nil {
+		return nil, err
+	}
+
+	server := &Server{
+		store:       store,
+		loginCounts: make(map[string]*loginAttempt),
 	}
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.Handle("GET /metrics", s.requireAdmin(s.handleMetrics))
-	mux.Handle("POST /metrics/research-event", s.requireAdmin(s.handleResearchEvent))
-	mux.Handle("GET /config", s.requireAdmin(s.handleGetConfig))
-	mux.Handle("GET /audit", s.requireAdmin(s.handleAudit))
-	mux.Handle("/", s.requireAdmin(http.FileServer(http.Dir("./web"))))
+	mux.HandleFunc("GET /health", server.handleHealth)
+	mux.HandleFunc("POST /api/auth/setup", server.handleSetup)
+	mux.HandleFunc("POST /api/auth/login", server.handleLogin)
+	mux.HandleFunc("POST /api/auth/logout", server.requireRole("admin", "researcher", "auditor")(server.handleLogout))
+	mux.HandleFunc("GET /api/auth/me", server.requireRole("admin", "researcher", "auditor")(server.handleMe))
+	mux.HandleFunc("POST /api/auth/change-password", server.requireRole("admin", "researcher", "auditor")(server.handleChangePassword))
 
-	s.httpServer = &http.Server{
+	mux.Handle("GET /api/metrics", server.requireRole("admin", "researcher", "auditor")(server.handleMetrics))
+	mux.Handle("POST /api/metrics/research-event", server.requireRole("admin", "researcher")(server.handleResearchEvent))
+	mux.Handle("GET /api/audit", server.requireRole("admin", "auditor")(server.handleAudit))
+	mux.Handle("GET /api/config", server.requireRole("admin")(server.handleConfig))
+
+	mux.Handle("/", server.requireRole("admin", "researcher", "auditor")(
+		http.FileServer(http.Dir("./web")),
+	))
+
+	server.httpServer = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	return s
+	return server, nil
 }
 
 func (s *Server) Start() error {
@@ -68,6 +75,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
 }
 
+func (s *Server) Close() error {
+	return s.store.Close()
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "ok",
@@ -75,69 +86,243 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	s.metrics.mu.Lock()
-	defer s.metrics.mu.Unlock()
+func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	admins, err := s.store.CountAdmins()
 
-	writeJSON(w, http.StatusOK, s.metrics)
-}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database_error")
+		return
+	}
 
-func (s *Server) handleResearchEvent(w http.ResponseWriter, r *http.Request) {
+	if admins > 0 {
+		writeError(w, http.StatusForbidden, "setup_already_completed")
+		return
+	}
+
 	var input struct {
-		CampaignID    string `json:"campaign_id"`
-		ControlTested string `json:"control_tested"`
-		Outcome       string `json:"outcome"`
+		Username string `json:"username"`
+		Password string `json:"password"`
 	}
 
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json")
+	if err := decodeJSON(w, r, &input); err != nil {
 		return
 	}
 
-	if input.CampaignID == "" || input.ControlTested == "" || input.Outcome == "" {
-		writeError(w, http.StatusBadRequest, "campaign_id, control_tested, and outcome are required")
+	username := normalizeUsername(input.Username)
+
+	if len(username) < 3 || len(username) > 64 || !validPassword(input.Password) {
+		writeError(w, http.StatusBadRequest, "invalid_username_or_password")
 		return
 	}
 
-	s.metrics.mu.Lock()
-	s.metrics.ResearchEvents++
-	s.metrics.LastResearchEventAt = time.Now().UTC()
-	s.metrics.mu.Unlock()
+	passwordHash, err := hashPassword(input.Password)
 
-	s.recordAudit("researcher", "research_event_recorded", input.ControlTested+" / "+input.Outcome)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "hashing_error")
+		return
+	}
 
-	writeJSON(w, http.StatusCreated, map[string]string{"status": "recorded"})
+	if err := s.store.CreateUser(username, passwordHash, "admin"); err != nil {
+		writeError(w, http.StatusInternalServerError, "account_creation_failed")
+		return
+	}
+
+	_ = s.store.RecordAudit(username, "admin_created", "Initial administrator account created")
+
+	writeJSON(w, http.StatusCreated, map[string]string{"status": "administrator_created"})
 }
 
-func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	if err := decodeJSON(w, r, &input); err != nil {
+		return
+	}
+
+	username := normalizeUsername(input.Username)
+	key := clientKey(r, username)
+
+	if !s.allowLoginAttempt(key) {
+		writeError(w, http.StatusTooManyRequests, "too_many_attempts")
+		return
+	}
+
+	user, err := s.store.GetUserByUsername(username)
+
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid_username_or_password")
+		return
+	}
+
+	if time.Now().Before(user.LockedUntil) {
+		writeError(w, http.StatusTooManyRequests, "account_temporarily_locked")
+		return
+	}
+
+	if !verifyPassword(input.Password, user.PasswordHash) {
+		lockedUntil := time.Now().Add(lockoutDuration)
+
+		if user.FailedLoginAttempts+1 < maxLoginAttempts {
+			lockedUntil = time.Time{}
+		}
+
+		_ = s.store.RecordFailedLogin(user.ID, lockedUntil)
+		writeError(w, http.StatusUnauthorized, "invalid_username_or_password")
+		return
+	}
+
+	token, err := randomToken()
+
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "session_creation_failed")
+		return
+	}
+
+	csrfToken, err := randomToken()
+
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "session_creation_failed")
+		return
+	}
+
+	expires := time.Now().Add(sessionLifetime)
+
+	if err := s.store.CreateSession(
+		user.ID,
+		hashToken(token),
+		csrfToken,
+		expires,
+	); err != nil {
+		writeError(w, http.StatusInternalServerError, "session_creation_failed")
+		return
+	}
+
+	_ = s.store.RecordSuccessfulLogin(user.ID)
+	_ = s.store.RecordAudit(user.Username, "login", "Successful control-panel login")
+
+	s.setSessionCookie(w, token, expires)
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"panel_mode":            "authorized_research",
-		"data_retention_days":   7,
-		"remote_admin_enabled":  false,
-		"credential_export":     false,
-		"session_export":        false,
-		"raw_request_logging":   false,
+		"username":    user.Username,
+		"role":        user.Role,
+		"csrf_token":  csrfToken,
+		"expires_at":  expires.UTC(),
 	})
 }
 
-func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
-	s.auditMu.Lock()
-	defer s.auditMu.Unlock()
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie(sessionCookieName)
 
-	writeJSON(w, http.StatusOK, s.audit)
+	if err == nil {
+		_ = s.store.DeleteSession(hashToken(cookie.Value))
+	}
+
+	s.clearSessionCookie(w)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
 }
 
-func (s *Server) recordAudit(actor, action, detail string) {
-	s.auditMu.Lock()
-	defer s.auditMu.Unlock()
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	session, err := s.currentSession(r)
 
-	s.audit = append(s.audit, AuditEvent{
-		ID:        len(s.audit) + 1,
-		Actor:     actor,
-		Action:    action,
-		Detail:    detail,
-		CreatedAt: time.Now().UTC(),
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "authentication_required")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"username": session.User.Username,
+		"role":     session.User.Role,
 	})
+}
+
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	session, err := s.currentSession(r)
+
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "authentication_required")
+		return
+	}
+
+	var input struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+
+	if err := decodeJSON(w, r, &input); err != nil {
+		return
+	}
+
+	user, err := s.store.GetUserByUsername(session.User.Username)
+
+	if err != nil || !verifyPassword(input.CurrentPassword, user.PasswordHash) {
+		writeError(w, http.StatusUnauthorized, "invalid_current_password")
+		return
+	}
+
+	if !validPassword(input.NewPassword) {
+		writeError(w, http.StatusBadRequest, "invalid_new_password")
+		return
+	}
+
+	newHash, err := hashPassword(input.NewPassword)
+
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "hashing_error")
+		return
+	}
+
+	if err := s.store.UpdatePassword(user.ID, newHash); err != nil {
+		writeError(w, http.StatusInternalServerError, "password_update_failed")
+		return
+	}
+
+	_ = s.store.DeleteSessionsForUser(user.ID)
+	_ = s.store.RecordAudit(user.Username, "password_changed", "Password changed; all sessions revoked")
+
+	s.clearSessionCookie(w)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "password_changed"})
+}
+
+func (s *Server) allowLoginAttempt(key string) bool {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+
+	now := time.Now()
+	attempt := s.loginCounts[key]
+
+	if attempt == nil || now.Sub(attempt.lastAttempt) > time.Minute {
+		s.loginCounts[key] = &loginAttempt{count: 1, lastAttempt: now}
+		return true
+	}
+
+	attempt.count++
+	attempt.lastAttempt = now
+
+	return attempt.count <= 10
+}
+
+func clientKey(r *http.Request, username string) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+
+	if err != nil {
+		host = r.RemoteAddr
+	}
+
+	return host + "|" + username
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+
+	if err := json.NewDecoder(r.Body).Decode(target); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json")
+		return err
+	}
+
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
