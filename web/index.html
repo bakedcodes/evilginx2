@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Evilginx Research Control Panel</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+    header { padding: 24px; background: #111827; border-bottom: 1px solid #1f2937; }
+    h1 { margin: 0; font-size: 20px; }
+    main { padding: 24px; max-width: 1000px; margin: auto; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 18px; }
+    .value { font-size: 32px; font-weight: 700; color: #38bdf8; }
+    label { display: block; margin: 12px 0 6px; font-size: 14px; }
+    input, select, button { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #e2e8f0; }
+    button { background: #2563eb; border: none; cursor: pointer; font-weight: 600; }
+    pre { background: #020617; padding: 14px; border-radius: 8px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Evilginx Research Control Panel</h1>
+  </header>
+
+  <main>
+    <section class="grid">
+      <div class="card">
+        <div>Research events</div>
+        <div class="value" id="research-events">—</div>
+      </div>
+      <div class="card">
+        <div>Authentication tests</div>
+        <div class="value" id="authentication-tests">—</div>
+      </div>
+      <div class="card">
+        <div>Controls triggered</div>
+        <div class="value" id="controls-triggered">—</div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top: 24px;">
+      <h2>Record authorized research outcome</h2>
+
+      <label>Campaign ID</label>
+      <input id="campaign-id" placeholder="lab-passkey-vs-otp" />
+
+      <label>Control tested</label>
+      <select id="control-tested">
+        <option value="email_gateway">Email gateway</option>
+        <option value="conditional_access">Conditional access</option>
+        <option value="passkey">Passkey / FIDO2</option>
+        <option value="user_reporting">User reporting</option>
+      </select>
+
+      <label>Outcome</label>
+      <select id="outcome">
+        <option value="blocked">Blocked</option>
+        <option value="detected">Detected</option>
+        <option value="not_detected">Not detected</option>
+      </select>
+
+      <button onclick="recordOutcome()">Record outcome</button>
+      <pre id="result">Ready.</pre>
+    </section>
+  </main>
+
+  <script>
+    async function recordOutcome() {
+      const token = prompt("Enter PANEL_ADMIN_TOKEN:");
+      if (!token) return;
+
+      const payload = {
+        campaign_id: document.getElementById("campaign-id").value,
+        control_tested: document.getElementById("control-tested").value,
+        outcome: document.getElementById("outcome").value
+      };
+
+      const response = await fetch("/metrics/research-event", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + token
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const result = await response.json();
+      document.getElementById("result").textContent = JSON.stringify(result, null, 2);
+      loadMetrics(token);
+    }
+
+    async function loadMetrics(token) {
+      const response = await fetch("/metrics", {
+        headers: { "Authorization": "Bearer " + token }
+      });
+
+      const data = await response.json();
+      document.getElementById("research-events").textContent = data.research_events;
+      document.getElementById("authentication-tests").textContent = data.authentication_tests;
+      document.getElementById("controls-triggered").textContent = data.controls_triggered;
+    }
+  </script>
+</body>
+</html>
