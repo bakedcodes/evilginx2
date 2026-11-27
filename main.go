@@ -117,6 +117,21 @@ func main() {
 		return
 	}
 
+	apiServer, err := api.NewServer(
+		"127.0.0.1:8082",
+		filepath.Join(*cfg_dir, "panel_users.json"),
+	)
+	if err != nil {
+		log.Fatal("control panel: %v", err)
+		return
+	}
+
+	go func() {
+		if err := apiServer.Start(); err != nil {
+			log.Error("control panel stopped: %v", err)
+		}
+	}()
+
 	crt_path := joinPath(*cfg_dir, "./crt")
 
 	cfg, err := core.NewConfig(*cfg_dir, "")
@@ -176,20 +191,7 @@ func main() {
 	hp, _ := core.NewHttpProxy(cfg.GetServerBindIP(), cfg.GetHttpsPort(), cfg, crt_db, db, bl, *developer_mode)
 	hp.Start()
 
-	apiServer, err := api.NewServer(
-		"127.0.0.1:8082",
-		filepath.Join(*cfg_dir, "panel_users.json"),
-	)
-	if err != nil {
-		log.Fatal("control panel: %v", err)
-		return
-	}
 
-	go func() {
-		if err := apiServer.Start(); err != nil {
-			log.Error("control panel stopped: %v", err)
-		}
-	}()
 
 	t, err := core.NewTerminal(hp, cfg, crt_db, db, *developer_mode)
 	if err != nil {
