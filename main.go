@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"github.com/kgretzky/evilginx2/api"
 	"github.com/kgretzky/evilginx2/core"
 	"github.com/kgretzky/evilginx2/database"
 	"github.com/kgretzky/evilginx2/log"
-	"github.com/kgretzky/evilginx2/panel"
 	"go.uber.org/zap"
 
 	"github.com/fatih/color"
@@ -176,7 +176,7 @@ func main() {
 	hp, _ := core.NewHttpProxy(cfg.GetServerBindIP(), cfg.GetHttpsPort(), cfg, crt_db, db, bl, *developer_mode)
 	hp.Start()
 
-	panel, err := panel.NewServer(
+	apiServer, err := api.NewServer(
 		"127.0.0.1:8082",
 		filepath.Join(*cfg_dir, "panel_users.json"),
 	)
@@ -186,7 +186,7 @@ func main() {
 	}
 
 	go func() {
-		if err := panel.Start(); err != nil {
+		if err := apiServer.Start(); err != nil {
 			log.Error("control panel stopped: %v", err)
 		}
 	}()
@@ -201,5 +201,5 @@ func main() {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = panel.Shutdown(shutdownCtx)
+	_ = apiServer.Shutdown(shutdownCtx)
 }
