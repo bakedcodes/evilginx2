@@ -1,72 +1,147 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Evilginx Research Control Panel</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
-    header { padding: 20px; background: #111827; border-bottom: 1px solid #1f2937; display: flex; justify-content: space-between; align-items: center; }
-    h1 { margin: 0; font-size: 18px; }
-    main { max-width: 900px; margin: auto; padding: 24px; }
-    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 18px; margin-bottom: 18px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
-    .value { font-size: 30px; font-weight: 700; color: #38bdf8; }
-    label { display: block; margin: 10px 0 5px; font-size: 14px; }
-    input, select, button { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #e2e8f0; }
-    button { background: #2563eb; border: none; font-weight: 600; cursor: pointer; margin-top: 12px; }
-    pre { background: #020617; padding: 12px; border-radius: 8px; overflow: auto; }
-    .hidden { display: none; }
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 18px 24px;
+      background: #111827;
+      border-bottom: 1px solid #1f2937;
+    }
+
+    main {
+      padding: 24px;
+      max-width: 1000px;
+      margin: auto;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 18px;
+      margin-bottom: 18px;
+    }
+
+    .value {
+      font-size: 32px;
+      font-weight: 700;
+      color: #38bdf8;
+    }
+
+    input,
+    select,
+    button {
+      width: 100%;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid #475569;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+
+    button {
+      background: #2563eb;
+      border: 0;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 12px;
+    }
+
+    label {
+      display: block;
+      margin: 12px 0 6px;
+      font-size: 14px;
+    }
+
+    .error {
+      color: #f87171;
+      margin-bottom: 12px;
+    }
+
+    pre {
+      background: #020617;
+      padding: 14px;
+      border-radius: 8px;
+      overflow: auto;
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>Evilginx Research Control Panel</h1>
-    <button id="logout" class="hidden">Log out</button>
-  </header>
+  <div id="login-view">
+    <main>
+      <div class="card" style="max-width: 420px; margin: 60px auto;">
+        <h2 id="auth-title">Sign in</h2>
+        <div id="auth-error" class="error"></div>
 
-  <main>
-    <section id="setup" class="card hidden">
-      <h2>First-run administrator setup</h2>
-      <label>Username</label>
-      <input id="setup-username" />
-      <label>Password</label>
-      <input id="setup-password" type="password" />
-      <button onclick="setupAdmin()">Create administrator</button>
-      <pre id="setup-result"></pre>
-    </section>
+        <label>Username</label>
+        <input id="username" autocomplete="username">
 
-    <section id="login" class="card hidden">
-      <h2>Administrator sign in</h2>
-      <label>Username</label>
-      <input id="login-username" autocomplete="username" />
-      <label>Password</label>
-      <input id="login-password" type="password" autocomplete="current-password" />
-      <button onclick="login()">Sign in</button>
-      <pre id="login-result"></pre>
-    </section>
+        <label>Password</label>
+        <input id="password" type="password" autocomplete="current-password">
 
-    <section id="dashboard" class="hidden">
-      <section class="grid">
+        <div id="confirm-password-field" style="display: none;">
+          <label>Confirm password</label>
+          <input id="confirm-password" type="password" autocomplete="new-password">
+        </div>
+
+        <button id="auth-button" onclick="submitAuth()">Sign in</button>
+      </div>
+    </main>
+  </div>
+
+  <div id="dashboard-view" style="display: none;">
+    <header>
+      <strong>Evilginx Research Control Panel</strong>
+      <button onclick="logout()">Log out</button>
+    </header>
+
+    <main>
+      <div class="card">
+        Signed in as <strong id="current-username"></strong> —
+        role: <strong id="current-role"></strong>
+      </div>
+
+      <div class="grid">
         <div class="card">
           <div>Research events</div>
-          <div class="value" id="research-events">—</div>
+          <div class="value" id="research-events">0</div>
         </div>
-        <div class="card">
-          <div>Controls blocked</div>
-          <div class="value" id="controls-blocked">—</div>
-        </div>
-        <div class="card">
-          <div>Controls detected</div>
-          <div class="value" id="controls-detected">—</div>
-        </div>
-      </section>
 
-      <section class="card">
+        <div class="card">
+          <div>Authentication tests</div>
+          <div class="value" id="authentication-tests">0</div>
+        </div>
+
+        <div class="card">
+          <div>Controls triggered</div>
+          <div class="value" id="controls-triggered">0</div>
+        </div>
+      </div>
+
+      <div class="card">
         <h2>Record authorized research outcome</h2>
 
         <label>Campaign ID</label>
-        <input id="campaign-id" placeholder="lab-passkey-vs-otp" />
+        <input id="campaign-id" placeholder="lab-passkey-vs-otp">
 
         <label>Control tested</label>
         <select id="control-tested">
@@ -84,20 +159,16 @@
         </select>
 
         <button onclick="recordOutcome()">Record outcome</button>
-        <pre id="research-result"></pre>
-      </section>
-
-      <section class="card">
-        <h2>Audit log</h2>
-        <pre id="audit-log">No audit events loaded.</pre>
-      </section>
-    </section>
-  </main>
+        <pre id="result"></pre>
+      </div>
+    </main>
+  </div>
 
   <script>
     let csrfToken = "";
+    let setupMode = false;
 
-    async function api(path, options = {}) {
+    async function apiRequest(path, options = {}) {
       const response = await fetch(path, {
         ...options,
         headers: {
@@ -117,95 +188,85 @@
       return data;
     }
 
-    async function checkStatus() {
-      const health = await fetch("/health").then(response => response.json());
+    async function loadAuthStatus() {
+      const status = await apiRequest("/api/auth/status");
+      setupMode = status.setup_required;
 
-      if (health.status !== "ok") {
-        document.getElementById("setup-result").textContent = "Panel unavailable.";
-        return;
-      }
+      document.getElementById("auth-title").textContent = setupMode
+        ? "Create administrator"
+        : "Sign in";
 
-      try {
-        const me = await api("/api/auth/me");
-        showDashboard(me);
-      } catch {
-        await checkSetupRequired();
-      }
+      document.getElementById("auth-button").textContent = setupMode
+        ? "Create administrator"
+        : "Sign in";
+
+      document.getElementById("confirm-password-field").style.display = setupMode
+        ? "block"
+        : "none";
     }
 
-    async function checkSetupRequired() {
-      const response = await fetch("/api/auth/setup", { method: "HEAD" });
-      const setupRequired = response.status === 405 || response.status === 200;
+    async function submitAuth() {
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+      const confirmPassword = document.getElementById("confirm-password").value;
 
-      document.getElementById(setupRequired ? "setup" : "login").classList.remove("hidden");
-    }
+      document.getElementById("auth-error").textContent = "";
 
-    async function setupAdmin() {
       try {
-        const result = await api("/api/auth/setup", {
+        if (setupMode) {
+          await apiRequest("/api/auth/register", {
+            method: "POST",
+            body: JSON.stringify({
+              username,
+              password,
+              confirm_password: confirmPassword
+            })
+          });
+
+          setupMode = false;
+          document.getElementById("auth-title").textContent = "Sign in";
+          document.getElementById("auth-button").textContent = "Sign in";
+          document.getElementById("confirm-password-field").style.display = "none";
+          return;
+        }
+
+        await apiRequest("/api/auth/login", {
           method: "POST",
-          body: JSON.stringify({
-            username: document.getElementById("setup-username").value,
-            password: document.getElementById("setup-password").value
-          })
+          body: JSON.stringify({ username, password })
         });
 
-        document.getElementById("setup-result").textContent = JSON.stringify(result, null, 2);
-        document.getElementById("setup").classList.add("hidden");
-        document.getElementById("login").classList.remove("hidden");
+        await loadDashboard();
       } catch (error) {
-        document.getElementById("setup-result").textContent = error.message;
+        document.getElementById("auth-error").textContent =
+          error.message.replaceAll("_", " ");
       }
     }
 
-    async function login() {
-      try {
-        const result = await api("/api/auth/login", {
-          method: "POST",
-          body: JSON.stringify({
-            username: document.getElementById("login-username").value,
-            password: document.getElementById("login-password").value
-          })
-        });
+    async function loadDashboard() {
+      const user = await apiRequest("/api/auth/me");
+      const metrics = await apiRequest("/api/metrics");
 
-        csrfToken = result.csrf_token;
-        showDashboard(result);
-      } catch (error) {
-        document.getElementById("login-result").textContent = error.message;
-      }
-    }
+      csrfToken = getCookie("panel_csrf");
 
-    async function logout() {
-      await api("/api/auth/logout", { method: "POST" });
-      location.reload();
-    }
+      document.getElementById("login-view").style.display = "none";
+      document.getElementById("dashboard-view").style.display = "block";
 
-    async function showDashboard(user) {
-      document.getElementById("login").classList.add("hidden");
-      document.getElementById("setup").classList.add("hidden");
-      document.getElementById("dashboard").classList.remove("hidden");
-      document.getElementById("logout").classList.remove("hidden");
+      document.getElementById("current-username").textContent = user.username;
+      document.getElementById("current-role").textContent = user.role;
 
-      await loadMetrics();
-      await loadAudit();
-    }
+      document.getElementById("research-events").textContent =
+        metrics.research_events;
 
-    async function loadMetrics() {
-      const metrics = await api("/api/metrics");
+      document.getElementById("authentication-tests").textContent =
+        metrics.authentication_tests;
 
-      document.getElementById("research-events").textContent = metrics.research_events;
-      document.getElementById("controls-blocked").textContent = metrics.controls_blocked;
-      document.getElementById("controls-detected").textContent = metrics.controls_detected;
-    }
-
-    async function loadAudit() {
-      const events = await api("/api/audit");
-      document.getElementById("audit-log").textContent = JSON.stringify(events, null, 2);
+      document.getElementById("controls-triggered").textContent =
+        metrics.controls_triggered;
     }
 
     async function recordOutcome() {
       try {
-        const result = await api("/api/metrics/research-event", {
+        const result = await apiRequest("/api/metrics/research-event", {
           method: "POST",
           body: JSON.stringify({
             campaign_id: document.getElementById("campaign-id").value,
@@ -214,15 +275,32 @@
           })
         });
 
-        document.getElementById("research-result").textContent = JSON.stringify(result, null, 2);
-        await loadMetrics();
+        document.getElementById("result").textContent =
+          JSON.stringify(result, null, 2);
+
+        await loadDashboard();
       } catch (error) {
-        document.getElementById("research-result").textContent = error.message;
+        document.getElementById("result").textContent = error.message;
       }
     }
 
-    document.getElementById("logout").onclick = logout;
-    checkStatus();
+    async function logout() {
+      await apiRequest("/api/auth/logout", { method: "POST" });
+
+      csrfToken = "";
+
+      document.getElementById("dashboard-view").style.display = "none";
+      document.getElementById("login-view").style.display = "block";
+
+      await loadAuthStatus();
+    }
+
+    function getCookie(name) {
+      const match = document.cookie.match(new RegExp("(^| )" + name + "=([^;]+)"));
+      return match ? decodeURIComponent(match[2]) : "";
+    }
+
+    loadAuthStatus();
   </script>
 </body>
 </html>
