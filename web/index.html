@@ -6,100 +6,223 @@
   <title>Evilginx Research Control Panel</title>
   <style>
     body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
-    header { padding: 24px; background: #111827; border-bottom: 1px solid #1f2937; }
-    h1 { margin: 0; font-size: 20px; }
-    main { padding: 24px; max-width: 1000px; margin: auto; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
-    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 18px; }
-    .value { font-size: 32px; font-weight: 700; color: #38bdf8; }
-    label { display: block; margin: 12px 0 6px; font-size: 14px; }
+    header { padding: 20px; background: #111827; border-bottom: 1px solid #1f2937; display: flex; justify-content: space-between; align-items: center; }
+    h1 { margin: 0; font-size: 18px; }
+    main { max-width: 900px; margin: auto; padding: 24px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 18px; margin-bottom: 18px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
+    .value { font-size: 30px; font-weight: 700; color: #38bdf8; }
+    label { display: block; margin: 10px 0 5px; font-size: 14px; }
     input, select, button { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #e2e8f0; }
-    button { background: #2563eb; border: none; cursor: pointer; font-weight: 600; }
-    pre { background: #020617; padding: 14px; border-radius: 8px; overflow: auto; }
+    button { background: #2563eb; border: none; font-weight: 600; cursor: pointer; margin-top: 12px; }
+    pre { background: #020617; padding: 12px; border-radius: 8px; overflow: auto; }
+    .hidden { display: none; }
   </style>
 </head>
 <body>
   <header>
     <h1>Evilginx Research Control Panel</h1>
+    <button id="logout" class="hidden">Log out</button>
   </header>
 
   <main>
-    <section class="grid">
-      <div class="card">
-        <div>Research events</div>
-        <div class="value" id="research-events">—</div>
-      </div>
-      <div class="card">
-        <div>Authentication tests</div>
-        <div class="value" id="authentication-tests">—</div>
-      </div>
-      <div class="card">
-        <div>Controls triggered</div>
-        <div class="value" id="controls-triggered">—</div>
-      </div>
+    <section id="setup" class="card hidden">
+      <h2>First-run administrator setup</h2>
+      <label>Username</label>
+      <input id="setup-username" />
+      <label>Password</label>
+      <input id="setup-password" type="password" />
+      <button onclick="setupAdmin()">Create administrator</button>
+      <pre id="setup-result"></pre>
     </section>
 
-    <section class="card" style="margin-top: 24px;">
-      <h2>Record authorized research outcome</h2>
+    <section id="login" class="card hidden">
+      <h2>Administrator sign in</h2>
+      <label>Username</label>
+      <input id="login-username" autocomplete="username" />
+      <label>Password</label>
+      <input id="login-password" type="password" autocomplete="current-password" />
+      <button onclick="login()">Sign in</button>
+      <pre id="login-result"></pre>
+    </section>
 
-      <label>Campaign ID</label>
-      <input id="campaign-id" placeholder="lab-passkey-vs-otp" />
+    <section id="dashboard" class="hidden">
+      <section class="grid">
+        <div class="card">
+          <div>Research events</div>
+          <div class="value" id="research-events">—</div>
+        </div>
+        <div class="card">
+          <div>Controls blocked</div>
+          <div class="value" id="controls-blocked">—</div>
+        </div>
+        <div class="card">
+          <div>Controls detected</div>
+          <div class="value" id="controls-detected">—</div>
+        </div>
+      </section>
 
-      <label>Control tested</label>
-      <select id="control-tested">
-        <option value="email_gateway">Email gateway</option>
-        <option value="conditional_access">Conditional access</option>
-        <option value="passkey">Passkey / FIDO2</option>
-        <option value="user_reporting">User reporting</option>
-      </select>
+      <section class="card">
+        <h2>Record authorized research outcome</h2>
 
-      <label>Outcome</label>
-      <select id="outcome">
-        <option value="blocked">Blocked</option>
-        <option value="detected">Detected</option>
-        <option value="not_detected">Not detected</option>
-      </select>
+        <label>Campaign ID</label>
+        <input id="campaign-id" placeholder="lab-passkey-vs-otp" />
 
-      <button onclick="recordOutcome()">Record outcome</button>
-      <pre id="result">Ready.</pre>
+        <label>Control tested</label>
+        <select id="control-tested">
+          <option value="email_gateway">Email gateway</option>
+          <option value="conditional_access">Conditional access</option>
+          <option value="passkey">Passkey / FIDO2</option>
+          <option value="user_reporting">User reporting</option>
+        </select>
+
+        <label>Outcome</label>
+        <select id="outcome">
+          <option value="blocked">Blocked</option>
+          <option value="detected">Detected</option>
+          <option value="not_detected">Not detected</option>
+        </select>
+
+        <button onclick="recordOutcome()">Record outcome</button>
+        <pre id="research-result"></pre>
+      </section>
+
+      <section class="card">
+        <h2>Audit log</h2>
+        <pre id="audit-log">No audit events loaded.</pre>
+      </section>
     </section>
   </main>
 
   <script>
-    async function recordOutcome() {
-      const token = prompt("Enter PANEL_ADMIN_TOKEN:");
-      if (!token) return;
+    let csrfToken = "";
 
-      const payload = {
-        campaign_id: document.getElementById("campaign-id").value,
-        control_tested: document.getElementById("control-tested").value,
-        outcome: document.getElementById("outcome").value
-      };
-
-      const response = await fetch("/metrics/research-event", {
-        method: "POST",
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
         headers: {
           "Content-Type": "application/json",
-          "Authorization": "Bearer " + token
+          "X-CSRF-Token": csrfToken,
+          ...(options.headers || {})
         },
-        body: JSON.stringify(payload)
+        credentials: "same-origin"
       });
 
-      const result = await response.json();
-      document.getElementById("result").textContent = JSON.stringify(result, null, 2);
-      loadMetrics(token);
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data.error || "request_failed");
+      }
+
+      return data;
     }
 
-    async function loadMetrics(token) {
-      const response = await fetch("/metrics", {
-        headers: { "Authorization": "Bearer " + token }
-      });
+    async function checkStatus() {
+      const health = await fetch("/health").then(response => response.json());
 
-      const data = await response.json();
-      document.getElementById("research-events").textContent = data.research_events;
-      document.getElementById("authentication-tests").textContent = data.authentication_tests;
-      document.getElementById("controls-triggered").textContent = data.controls_triggered;
+      if (health.status !== "ok") {
+        document.getElementById("setup-result").textContent = "Panel unavailable.";
+        return;
+      }
+
+      try {
+        const me = await api("/api/auth/me");
+        showDashboard(me);
+      } catch {
+        await checkSetupRequired();
+      }
     }
+
+    async function checkSetupRequired() {
+      const response = await fetch("/api/auth/setup", { method: "HEAD" });
+      const setupRequired = response.status === 405 || response.status === 200;
+
+      document.getElementById(setupRequired ? "setup" : "login").classList.remove("hidden");
+    }
+
+    async function setupAdmin() {
+      try {
+        const result = await api("/api/auth/setup", {
+          method: "POST",
+          body: JSON.stringify({
+            username: document.getElementById("setup-username").value,
+            password: document.getElementById("setup-password").value
+          })
+        });
+
+        document.getElementById("setup-result").textContent = JSON.stringify(result, null, 2);
+        document.getElementById("setup").classList.add("hidden");
+        document.getElementById("login").classList.remove("hidden");
+      } catch (error) {
+        document.getElementById("setup-result").textContent = error.message;
+      }
+    }
+
+    async function login() {
+      try {
+        const result = await api("/api/auth/login", {
+          method: "POST",
+          body: JSON.stringify({
+            username: document.getElementById("login-username").value,
+            password: document.getElementById("login-password").value
+          })
+        });
+
+        csrfToken = result.csrf_token;
+        showDashboard(result);
+      } catch (error) {
+        document.getElementById("login-result").textContent = error.message;
+      }
+    }
+
+    async function logout() {
+      await api("/api/auth/logout", { method: "POST" });
+      location.reload();
+    }
+
+    async function showDashboard(user) {
+      document.getElementById("login").classList.add("hidden");
+      document.getElementById("setup").classList.add("hidden");
+      document.getElementById("dashboard").classList.remove("hidden");
+      document.getElementById("logout").classList.remove("hidden");
+
+      await loadMetrics();
+      await loadAudit();
+    }
+
+    async function loadMetrics() {
+      const metrics = await api("/api/metrics");
+
+      document.getElementById("research-events").textContent = metrics.research_events;
+      document.getElementById("controls-blocked").textContent = metrics.controls_blocked;
+      document.getElementById("controls-detected").textContent = metrics.controls_detected;
+    }
+
+    async function loadAudit() {
+      const events = await api("/api/audit");
+      document.getElementById("audit-log").textContent = JSON.stringify(events, null, 2);
+    }
+
+    async function recordOutcome() {
+      try {
+        const result = await api("/api/metrics/research-event", {
+          method: "POST",
+          body: JSON.stringify({
+            campaign_id: document.getElementById("campaign-id").value,
+            control_tested: document.getElementById("control-tested").value,
+            outcome: document.getElementById("outcome").value
+          })
+        });
+
+        document.getElementById("research-result").textContent = JSON.stringify(result, null, 2);
+        await loadMetrics();
+      } catch (error) {
+        document.getElementById("research-result").textContent = error.message;
+      }
+    }
+
+    document.getElementById("logout").onclick = logout;
+    checkStatus();
   </script>
 </body>
 </html>
