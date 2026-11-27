@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"time"
 )
@@ -39,7 +38,7 @@ func NewServer(addr, usersPath string) (*Server, error) {
 	mux.HandleFunc("POST /api/metrics/research-event", server.requireAuth(server.recordResearchEvent))
 	mux.HandleFunc("GET /api/audit", server.requireAuth(server.getAudit))
 
-	mux.Handle("/", server.requireAuth(http.FileServer(http.Dir("./web"))))
+	mux.Handle("/", server.requireAuthHandler(http.FileServer(http.Dir("./web"))))
 
 	server.http = &http.Server{
 		Addr:              addr,
@@ -148,7 +147,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		Value:    session.Token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   false, // Set to true when serving the panel over HTTPS.
+		Secure:   false,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(sessionExpiresIn.Seconds()),
 	})
@@ -158,14 +157,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		Value:    session.CSRFToken,
 		Path:     "/",
 		HttpOnly: false,
-		Secure:   false, // Set to true when serving the panel over HTTPS.
+		Secure:   false,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(sessionExpiresIn.Seconds()),
 	})
 
 	s.store.RecordAudit(user.Username, "login_success", clientIP)
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]string{
 		"username": user.Username,
 		"role":     user.Role,
 	})
