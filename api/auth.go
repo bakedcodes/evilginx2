@@ -47,6 +47,43 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (s *Server) requireAuthHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie(sessionCookieName)
+		if err != nil || cookie.Value == "" {
+			writeError(w, http.StatusUnauthorized, "authentication_required")
+			return
+		}
+
+		session, valid := s.store.GetSession(cookie.Value)
+		if !valid {
+			clearAuthCookies(w)
+			writeError(w, http.StatusUnauthorized, "session_expired")
+			return
+		}
+
+		if r.Method == http.MethodPost ||
+			r.Method == http.MethodPut ||
+			r.Method == http.MethodPatch ||
+			r.Method == http.MethodDelete {
+
+			csrfCookie, err := r.Cookie(csrfCookieName)
+			csrfHeader := r.Header.Get("X-CSRF-Token")
+
+			if err != nil ||
+				csrfCookie.Value == "" ||
+				csrfHeader == "" ||
+				!constantTimeEqual(csrfCookie.Value, csrfHeader) {
+				writeError(w, http.StatusForbidden, "invalid_csrf_token")
+				return
+			}
+		}
+
+		r = r.WithContext(withSession(r.Context(), session))
+		next.ServeHTTP(w, r)
+	})
+}
+
 func constantTimeEqual(a, b string) bool {
 	if len(a) != len(b) {
 		return false
