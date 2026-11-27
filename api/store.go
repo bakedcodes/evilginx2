@@ -1,312 +1,436 @@
 package api
 
 import (
-	"database/sql"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"golang.org/x/crypto/bcrypt"
 )
 
-var ErrNotFound = errors.New("not found")
+const sessionExpiresIn = 8 * time.Hour
+
+var (
+	ErrInvalidCredentials = errors.New("invalid_username_or_password")
+	ErrAccountLocked      = errors.New("account_temporarily_locked")
+	ErrUserExists         = errors.New("username_already_exists")
+	ErrUserNotFound       = errors.New("user_not_found")
+	ErrWeakPassword       = errors.New("password_must_be_at_least_12_characters")
+	ErrInvalidUsername    = errors.New("invalid_username")
+	ErrInvalidRole        = errors.New("invalid_role")
+)
+
+type User struct {
+	Username            string    `json:"username"`
+	PasswordHash        string    `json:"password_hash"`
+	Role                string    `json:"role"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
+	LastLoginAt         time.Time `json:"last_login_at,omitempty"`
+	FailedLoginAttempts int       `json:"failed_login_attempts"`
+	LockedUntil         time.Time `json:"locked_until,omitempty"`
+}
+
+type Session struct {
+	Token     string
+	TokenHash string
+	Username  string
+	Role      string
+	CSRFToken string
+	ExpiresAt time.Time
+}
+
+type AuditEvent struct {
+	ID        int       `json:"id"`
+	Actor     string    `json:"actor"`
+	Action    string    `json:"action"`
+	Detail    string    `json:"detail"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type Metrics struct {
+	ResearchEvents      int       `json:"research_events"`
+	AuthenticationTests int       `json:"authentication_tests"`
+	MfaPrompts          int       `json:"mfa_prompts"`
+	ControlsTriggered   int       `json:"controls_triggered"`
+	LastEventAt         time.Time `json:"last_event_at,omitempty"`
+}
 
 type Store struct {
-	db *sql.DB
+	mu         sync.RWMutex
+	usersPath  string
+	users      map[string]*User
+	sessions   map[string]*Session
+	loginTries map[string][]time.Time
+	audit      []AuditEvent
+	metrics    Metrics
 }
 
-func NewStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
+func NewStore(usersPath string) (*Store, error) {
+	store := &Store{
+		usersPath:  usersPath,
+		users:      make(map[string]*User),
+		sessions:   make(map[string]*Session),
+		loginTries: make(map[string][]time.Time),
+	}
+
+	if err := store.loadUsers(); err != nil {
 		return nil, err
 	}
 
-	if _, err := db.Exec(`
-		PRAGMA journal_mode=WAL;
-		PRAGMA foreign_keys=ON;
-
-		CREATE TABLE IF NOT EXISTS users (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			username TEXT NOT NULL UNIQUE,
-			password_hash TEXT NOT NULL,
-			role TEXT NOT NULL CHECK (role IN ('admin', 'researcher', 'auditor')),
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			last_login_at INTEGER,
-			failed_login_attempts INTEGER NOT NULL DEFAULT 0,
-			locked_until INTEGER
-		);
-
-		CREATE TABLE IF NOT EXISTS sessions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			token_hash TEXT NOT NULL UNIQUE,
-			csrf_token TEXT NOT NULL,
-			created_at INTEGER NOT NULL,
-			expires_at INTEGER NOT NULL
-		);
-
-		CREATE TABLE IF NOT EXISTS audit_events (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			actor TEXT NOT NULL,
-			action TEXT NOT NULL,
-			detail TEXT NOT NULL,
-			created_at INTEGER NOT NULL
-		);
-
-		CREATE TABLE IF NOT EXISTS research_events (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			campaign_id TEXT NOT NULL,
-			control_tested TEXT NOT NULL,
-			outcome TEXT NOT NULL,
-			created_at INTEGER NOT NULL
-		);
-	`); err != nil {
-		return nil, err
-	}
-
-	return &Store{db: db}, nil
+	return store, nil
 }
 
-func (s *Store) Close() error {
-	return s.db.Close()
-}
+func (s *Store) loadUsers() error {
+	data, err := os.ReadFile(s.usersPath)
 
-func (s *Store) CountAdmins() (int, error) {
-	var count int
-
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM users WHERE role = 'admin'`,
-	).Scan(&count)
-
-	return count, err
-}
-
-func (s *Store) CreateUser(username, passwordHash, role string) error {
-	now := time.Now().Unix()
-
-	_, err := s.db.Exec(
-		`INSERT INTO users (username, password_hash, role, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		username, passwordHash, role, now, now,
-	)
-
-	return err
-}
-
-func (s *Store) GetUserByUsername(username string) (*User, error) {
-	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, role, failed_login_attempts, locked_until
-		 FROM users WHERE username = ?`,
-		username,
-	)
-
-	user := &User{}
-
-	var lockedUntil sql.NullInt64
-
-	err := row.Scan(
-		&user.ID,
-		&user.Username,
-		&user.PasswordHash,
-		&user.Role,
-		&user.FailedLoginAttempts,
-		&lockedUntil,
-	)
-
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
 
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	if lockedUntil.Valid {
-		user.LockedUntil = time.Unix(lockedUntil.Int64, 0)
+	users := make(map[string]*User)
+
+	if err := json.Unmarshal(data, &users); err != nil {
+		return err
 	}
+
+	s.users = users
+	return nil
+}
+
+func (s *Store) saveUsers() error {
+	data, err := json.MarshalIndent(s.users, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(s.usersPath), 0700); err != nil {
+		return err
+	}
+
+	tempPath := s.usersPath + ".tmp"
+
+	if err := os.WriteFile(tempPath, data, 0600); err != nil {
+		return err
+	}
+
+	return os.Rename(tempPath, s.usersPath)
+}
+
+func (s *Store) HasUsers() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return len(s.users) > 0
+}
+
+func (s *Store) CreateUser(username, password, role string) error {
+	username = normalizeUsername(username)
+
+	if !validUsername(username) {
+		return ErrInvalidUsername
+	}
+
+	if !strongPassword(password) {
+		return ErrWeakPassword
+	}
+
+	if role != "admin" && role != "researcher" && role != "auditor" {
+		return ErrInvalidRole
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.users[username]; exists {
+		return ErrUserExists
+	}
+
+	now := time.Now().UTC()
+
+	s.users[username] = &User{
+		Username:     username,
+		PasswordHash: string(passwordHash),
+		Role:         role,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	return s.saveUsers()
+}
+
+func (s *Store) Authenticate(username, password, clientIP string) (*User, error) {
+	username = normalizeUsername(username)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if isRateLimited(s.loginTries[clientIP]) {
+		return nil, ErrAccountLocked
+	}
+
+	user, exists := s.users[username]
+	if !exists {
+		s.loginTries[clientIP] = append(s.loginTries[clientIP], time.Now().UTC())
+		return nil, ErrInvalidCredentials
+	}
+
+	if time.Now().Before(user.LockedUntil) {
+		return nil, ErrAccountLocked
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		user.FailedLoginAttempts++
+		s.loginTries[clientIP] = append(s.loginTries[clientIP], time.Now().UTC())
+
+		if user.FailedLoginAttempts >= 5 {
+			user.LockedUntil = time.Now().UTC().Add(15 * time.Minute)
+		}
+
+		_ = s.saveUsers()
+
+		return nil, ErrInvalidCredentials
+	}
+
+	user.FailedLoginAttempts = 0
+	user.LockedUntil = time.Time{}
+	user.LastLoginAt = time.Now().UTC()
+
+	_ = s.saveUsers()
 
 	return user, nil
 }
 
-func (s *Store) RecordFailedLogin(userID int, lockedUntil time.Time) error {
-	now := time.Now().Unix()
-
-	_, err := s.db.Exec(
-		`UPDATE users
-		 SET failed_login_attempts = failed_login_attempts + 1,
-		     locked_until = ?
-		 WHERE id = ?`,
-		lockedUntil.Unix(), userID,
-	)
-
-	return err
-}
-
-func (s *Store) RecordSuccessfulLogin(userID int) error {
-	now := time.Now().Unix()
-
-	_, err := s.db.Exec(
-		`UPDATE users
-		 SET failed_login_attempts = 0,
-		     locked_until = NULL,
-		     last_login_at = ?
-		 WHERE id = ?`,
-		now, userID,
-	)
-
-	return err
-}
-
-func (s *Store) CreateSession(userID int, tokenHash, csrfToken string, expiresAt time.Time) error {
-	_, err := s.db.Exec(
-		`INSERT INTO sessions (user_id, token_hash, csrf_token, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		userID, tokenHash, csrfToken, time.Now().Unix(), expiresAt.Unix(),
-	)
-
-	return err
-}
-
-func (s *Store) GetSession(tokenHash string) (*Session, error) {
-	row := s.db.QueryRow(
-		`SELECT s.id, s.user_id, s.csrf_token, s.expires_at, u.username, u.role
-		 FROM sessions s
-		 JOIN users u ON u.id = s.user_id
-		 WHERE s.token_hash = ? AND s.expires_at > ?`,
-		tokenHash, time.Now().Unix(),
-	)
-
-	session := &Session{}
-	user := &User{}
-
-	err := row.Scan(
-		&session.ID,
-		&session.UserID,
-		&session.CSRFToken,
-		&session.ExpiresAt,
-		&user.Username,
-		&user.Role,
-	)
-
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-
+func (s *Store) CreateSession(user *User) (*Session, error) {
+	token, err := randomToken(32)
 	if err != nil {
 		return nil, err
 	}
 
-	session.User = user
+	csrfToken, err := randomToken(32)
+	if err != nil {
+		return nil, err
+	}
+
+	session := &Session{
+		Token:     token,
+		TokenHash: hashToken(token),
+		Username:  user.Username,
+		Role:      user.Role,
+		CSRFToken: csrfToken,
+		ExpiresAt: time.Now().UTC().Add(sessionExpiresIn),
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.sessions[session.TokenHash] = session
 
 	return session, nil
 }
 
-func (s *Store) DeleteSession(tokenHash string) error {
-	_, err := s.db.Exec(
-		`DELETE FROM sessions WHERE token_hash = ?`,
-		tokenHash,
-	)
-
-	return err
-}
-
-func (s *Store) DeleteSessionsForUser(userID int) error {
-	_, err := s.db.Exec(
-		`DELETE FROM sessions WHERE user_id = ?`,
-		userID,
-	)
-
-	return err
-}
-
-func (s *Store) UpdatePassword(userID int, passwordHash string) error {
-	_, err := s.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`,
-		passwordHash, time.Now().Unix(), userID,
-	)
-
-	return err
-}
-
-func (s *Store) RecordAudit(actor, action, detail string) error {
-	_, err := s.db.Exec(
-		`INSERT INTO audit_events (actor, action, detail, created_at)
-		 VALUES (?, ?, ?, ?)`,
-		actor, action, detail, time.Now().Unix(),
-	)
-
-	return err
-}
-
-func (s *Store) ListAudit(limit int) ([]AuditEvent, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
+func (s *Store) GetSession(token string) (*Session, bool) {
+	if token == "" {
+		return nil, false
 	}
 
-	rows, err := s.db.Query(
-		`SELECT id, actor, action, detail, created_at
-		 FROM audit_events
-		 ORDER BY id DESC
-		 LIMIT ?`,
-		limit,
-	)
+	tokenHash := hashToken(token)
 
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	session, exists := s.sessions[tokenHash]
+	if !exists || time.Now().After(session.ExpiresAt) {
+		return nil, false
+	}
+
+	return session, true
+}
+
+func (s *Store) DeleteSession(token string) {
+	if token == "" {
+		return
+	}
+
+	tokenHash := hashToken(token)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.sessions, tokenHash)
+}
+
+func (s *Store) ChangePassword(username, currentPassword, newPassword string) error {
+	username = normalizeUsername(username)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, exists := s.users[username]
+	if !exists {
+		return ErrUserNotFound
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+		return ErrInvalidCredentials
+	}
+
+	if !strongPassword(newPassword) {
+		return ErrWeakPassword
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	defer rows.Close()
+	user.PasswordHash = string(passwordHash)
+	user.UpdatedAt = time.Now().UTC()
 
-	events := []AuditEvent{}
-
-	for rows.Next() {
-		var event AuditEvent
-		var createdAt int64
-
-		if err := rows.Scan(
-			&event.ID,
-			&event.Actor,
-			&event.Action,
-			&event.Detail,
-			&createdAt,
-		); err != nil {
-			return nil, err
+	for tokenHash, session := range s.sessions {
+		if session.Username == username {
+			delete(s.sessions, tokenHash)
 		}
-
-		event.CreatedAt = time.Unix(createdAt, 0)
-		events = append(events, event)
 	}
 
-	return events, rows.Err()
+	return s.saveUsers()
 }
 
-func (s *Store) RecordResearchEvent(campaignID, control, outcome string) error {
-	_, err := s.db.Exec(
-		`INSERT INTO research_events (campaign_id, control_tested, outcome, created_at)
-		 VALUES (?, ?, ?, ?)`,
-		campaignID, control, outcome, time.Now().Unix(),
-	)
+func (s *Store) RecordAudit(actor, action, detail string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	return err
+	s.audit = append(s.audit, AuditEvent{
+		ID:        len(s.audit) + 1,
+		Actor:     actor,
+		Action:    action,
+		Detail:    detail,
+		CreatedAt: time.Now().UTC(),
+	})
 }
 
-func (s *Store) GetMetrics() (map[string]any, error) {
-	var researchEvents, blocked, detected int
+func (s *Store) GetAudit() []AuditEvent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	err := s.db.QueryRow(
-		`SELECT COUNT(*),
-		        COALESCE(SUM(CASE WHEN outcome = 'blocked' THEN 1 ELSE 0 END), 0),
-		        COALESCE(SUM(CASE WHEN outcome = 'detected' THEN 1 ELSE 0 END), 0)
-		 FROM research_events`,
-	).Scan(&researchEvents, &blocked, &detected)
+	result := make([]AuditEvent, len(s.audit))
+	copy(result, s.audit)
 
-	if err != nil {
-		return nil, err
+	return result
+}
+
+func (s *Store) RecordResearchEvent() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.metrics.ResearchEvents++
+	s.metrics.LastEventAt = time.Now().UTC()
+}
+
+func (s *Store) GetMetrics() Metrics {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.metrics
+}
+
+func normalizeUsername(username string) string {
+	if len(username) > 64 {
+		username = username[:64]
 	}
 
-	return map[string]any{
-		"research_events":   researchEvents,
-		"controls_blocked":  blocked,
-		"controls_detected": detected,
-	}, nil
+	return username
+}
+
+func validUsername(username string) bool {
+	if len(username) < 3 || len(username) > 64 {
+		return false
+	}
+
+	for _, character := range username {
+		valid := (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			character == '.' ||
+			character == '_' ||
+			character == '-'
+
+		if !valid {
+			return false
+		}
+	}
+
+	return true
+}
+
+func strongPassword(password string) bool {
+	return len(password) >= 12
+}
+
+func isRateLimited(attempts []time.Time) bool {
+	now := time.Now().UTC()
+	recentAttempts := 0
+
+	for _, attempt := range attempts {
+		if now.Sub(attempt) < 15*time.Minute {
+			recentAttempts++
+		}
+	}
+
+	return recentAttempts >= 10
+}
+
+func randomToken(length int) (string, error) {
+	bytes := make([]byte, length)
+
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(bytes), nil
+}
+
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func readJSON(w http.ResponseWriter, r *http.Request, destination any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(destination); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json")
+		return err
+	}
+
+	return nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeError(w http.ResponseWriter, status int, code string) {
+	writeJSON(w, status, map[string]string{"error": code})
 }
